@@ -6,6 +6,9 @@ import os
 import json
 import redis
 from models.openai import MessageIn
+from models.openai import ModelDB, ModelIn, SessionDB
+from sqlmodel import Session, select
+from db import engine
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,6 +20,12 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # 创建 FastAPI 路由
 router = APIRouter(prefix="/openai", tags=["openai"])
 
+
+def get_session():
+    with Session(engine) as session:
+        yield session
+
+
 # 初始化 OpenAI 客户端
 client = OpenAI(
     base_url="https://api.openai-proxy.org/v1",
@@ -27,23 +36,33 @@ redis_client = redis.StrictRedis(
 )
 
 
+# 创建会话依赖
+def create_session(session: SessionDB, session_db: Session = Depends(get_session)):
+    db_session = SessionDB.model_validate(session)
+    session_db.add(db_session)
+    session_db.commit()
+    session_db.refresh(db_session)
+    return db_session
+
+
 # 生成事件流的异步生成器函数
 async def generate_event_stream(completion):
+    ai_content = ""
+
     try:
-        ai_content = ""
         for chunk in completion:
-            delta = chunk.choices[0].delta
-            if chunk.choices and delta.content:
-                ai_content += delta.content
-                yield delta.content
+            if chunk.choices:
+                delta = chunk.choices[0].delta
+                if delta.content:  # 确保有内容
+                    ai_content += delta.content
+                    yield delta.content
             else:
-                print(f"Unexpected chunk structure: {chunk}")
+                print(f"Unexpected chunk structure:")
     except Exception as e:
-        print(f"Error during event streaming: {e}")
         raise HTTPException(status_code=500, detail="生成失败，请稍后再试")
     finally:
         if ai_content:  # 确保有生成的 AI 内容
-            print(f"保存消息到 Redis: {ai_content}")
+            print(f"保存消息到 Redis")
 
 
 def generate_completion(message: MessageIn):
@@ -71,10 +90,53 @@ async def stream_chat(
     response.headers["Content-Type"] = "text/event-stream"
     response.headers["Cache-Control"] = "no-cache"
     response.headers["Connection"] = "keep-alive"
-    print(message.history)
 
     # 后台任务
     # print("将content保存到db", message)
 
     # 返回 EventSourceResponse，异步生成数据
-    return EventSourceResponse(generate_event_stream(completion))
+    return EventSourceResponse(
+        generate_event_stream(
+            completion,
+            message=message,
+        )
+    )
+
+
+@router.post("/model", response_model=ModelDB)
+def create_model(model: ModelIn, session: Session = Depends(get_session)):
+    if session.exec(select(ModelDB).where(ModelDB.model == model.model)).first():
+        raise HTTPException(status_code=400, detail="模型已存在")
+    db_model = ModelDB.model_validate(model)
+    session.add(db_model)
+    session.commit()
+    session.refresh(db_model)
+
+    return db_model
+
+
+@router.get("/model", response_model=list[ModelDB])
+def get_models(session: Session = Depends(get_session)):
+    return session.exec(select(ModelDB)).all()
+
+
+# 切换模型
+@router.get("/toggle/{model_id}")
+def toggle_model(model_id: int, session: Session = Depends(get_session)):
+    all_modles = session.exec(select(ModelDB).where(ModelDB.active == True)).all()
+    for m in all_modles:
+        m.active = False
+        session.add(m)
+    model = session.get(ModelDB, model_id)
+    if not model:
+        raise HTTPException(status_code=404, detail="模型不存在")
+    model.active = True
+    session.add(model)
+    session.commit()
+    session.refresh(model)
+    return model
+
+
+@router.post("/session", response_model=SessionDB)
+def create_session(session=Depends(create_session)):
+    return session
