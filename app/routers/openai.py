@@ -46,10 +46,28 @@ def create_session(session: SessionDB, session_db: Session = Depends(get_session
 
 
 # 生成事件流的异步生成器函数
-async def generate_event_stream(completion):
-    ai_content = ""
+def generate_event_stream(completion, message: MessageIn):
 
+    if not message.session_id:
+        with Session(engine) as session:
+            true_session = session.exec(
+                select(SessionDB).where(
+                    SessionDB.active == True, SessionDB.user_id == message.user_id
+                )
+            ).all()
+            for s in true_session:  # 关闭其他会话
+                s.active = False
+                session.add(s)
+            new_session = SessionDB(
+                name="默认会话", active=True, user_id=message.user_id
+            )
+            session.add(new_session)
+            session.commit()
+            session.refresh(new_session)
+            message.session_id = new_session.id
+            yield new_session
     try:
+        ai_content = ""
         for chunk in completion:
             if chunk.choices:
                 delta = chunk.choices[0].delta
@@ -66,7 +84,6 @@ async def generate_event_stream(completion):
 
 
 def generate_completion(message: MessageIn):
-
     try:
         # 创建 OpenAI 的 chat completions 流式请求
         completion = client.chat.completions.create(
@@ -95,12 +112,7 @@ async def stream_chat(
     # print("将content保存到db", message)
 
     # 返回 EventSourceResponse，异步生成数据
-    return EventSourceResponse(
-        generate_event_stream(
-            completion,
-            message=message,
-        )
-    )
+    return EventSourceResponse(generate_event_stream(completion, message))
 
 
 @router.post("/model", response_model=ModelDB)
@@ -137,6 +149,12 @@ def toggle_model(model_id: int, session: Session = Depends(get_session)):
     return model
 
 
+# 创建会话
 @router.post("/session", response_model=SessionDB)
 def create_session(session=Depends(create_session)):
     return session
+
+
+@router.get("/session/{user_id}", response_model=list[SessionDB])
+def get_sessions(*, session: Session = Depends(get_session), user_id: int):
+    return session.exec(select(SessionDB).where(SessionDB.user_id == user_id)).all()
