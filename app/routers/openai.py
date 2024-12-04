@@ -65,7 +65,7 @@ def generate_event_stream(completion, message: MessageIn):
             session.commit()
             session.refresh(new_session)
             message.session_id = new_session.id
-            yield new_session
+            yield json.dumps({"type": "session", "data": new_session.model_dump_json()})
     try:
         ai_content = ""
         for chunk in completion:
@@ -73,14 +73,16 @@ def generate_event_stream(completion, message: MessageIn):
                 delta = chunk.choices[0].delta
                 if delta.content:  # 确保有内容
                     ai_content += delta.content
-                    yield delta.content
+                    yield json.dumps({"type": "message", "content": delta.content})
             else:
                 print(f"Unexpected chunk structure:")
+                return
     except Exception as e:
         raise HTTPException(status_code=500, detail="生成失败，请稍后再试")
     finally:
         if ai_content:  # 确保有生成的 AI 内容
             print(f"保存消息到 Redis")
+            print(ai_content)
 
 
 def generate_completion(message: MessageIn):
