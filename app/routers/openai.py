@@ -36,12 +36,6 @@ redis_client = redis.StrictRedis(
 
 
 # 创建会话依赖
-def create_session(session: SessionDB, session_db: Session = Depends(get_session)):
-    db_session = SessionDB.model_validate(session)
-    session_db.add(db_session)
-    session_db.commit()
-    session_db.refresh(db_session)
-    return db_session
 
 
 # 生成事件流的异步生成器函数
@@ -164,6 +158,14 @@ def toggle_model(model_id: int, session: Session = Depends(get_session)):
 
 
 # 创建会话
+def create_session(session: SessionDB, session_db: Session = Depends(get_session)):
+    db_session = SessionDB.model_validate(session)
+    session_db.add(db_session)
+    session_db.commit()
+    session_db.refresh(db_session)
+    return db_session
+
+
 @router.post("/session", response_model=SessionDB)
 def create_session(session=Depends(create_session)):
     return session
@@ -172,3 +174,14 @@ def create_session(session=Depends(create_session)):
 @router.get("/session/{user_id}", response_model=list[SessionDB])
 def get_sessions(*, session: Session = Depends(get_session), user_id: int):
     return session.exec(select(SessionDB).where(SessionDB.user_id == user_id).order_by(SessionDB.id.desc())).all()
+
+
+@router.delete("/session/{session_id}")
+def delete_session(session_id: int, session: Session = Depends(get_session)):
+    data = session.get(SessionDB, session_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    session.delete(data)
+    session.commit()
+    print(data)
+    return {"message": "删除成功", "session_id": session_id}

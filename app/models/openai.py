@@ -42,7 +42,7 @@ class SessionDB(DBBase, table=True):
     name: str
     active: bool = True
     user_id: int = Field(index=True)
-    messages: list["MessageDB"] = Relationship(back_populates="session")
+    messages: list["MessageDB"] = Relationship(back_populates="session", cascade_delete=True)
 
 
 class MessageDB(DBBase, table=True):
