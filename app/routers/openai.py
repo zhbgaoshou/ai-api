@@ -6,7 +6,7 @@ import os
 import json
 import redis
 from models.openai import MessageIn
-from models.openai import ModelDB, ModelIn, SessionDB
+from models.openai import ModelDB, ModelIn, SessionDB, MessageDB
 from sqlmodel import Session, select
 from db import engine
 from dotenv import load_dotenv
@@ -15,7 +15,6 @@ load_dotenv()
 
 # 从环境变量加载 OpenAI API 密钥，避免硬编码
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
 
 # 创建 FastAPI 路由
 router = APIRouter(prefix="/openai", tags=["openai"])
@@ -47,13 +46,10 @@ def create_session(session: SessionDB, session_db: Session = Depends(get_session
 
 # 生成事件流的异步生成器函数
 def generate_event_stream(completion, message: MessageIn):
-
     if not message.session_id:
         with Session(engine) as session:
             true_session = session.exec(
-                select(SessionDB).where(
-                    SessionDB.active == True, SessionDB.user_id == message.user_id
-                )
+                select(SessionDB).where(SessionDB.active, SessionDB.user_id == message.user_id)
             ).all()
             for s in true_session:  # 关闭其他会话
                 s.active = False
@@ -66,8 +62,8 @@ def generate_event_stream(completion, message: MessageIn):
             session.refresh(new_session)
             message.session_id = new_session.id
             yield json.dumps({"type": "session", "data": new_session.model_dump_json()})
+    ai_content = ""
     try:
-        ai_content = ""
         for chunk in completion:
             if chunk.choices:
                 delta = chunk.choices[0].delta
@@ -80,9 +76,26 @@ def generate_event_stream(completion, message: MessageIn):
     except Exception as e:
         raise HTTPException(status_code=500, detail="生成失败，请稍后再试")
     finally:
-        if ai_content:  # 确保有生成的 AI 内容
-            print(f"保存消息到 Redis")
-            print(ai_content)
+        if ai_content:
+            # 保存数据库
+            with Session(engine) as session:
+                user_message = MessageDB(
+                    content=message.content,
+                    model=message.model,
+                    role="assistant",
+                    session_id=message.session_id,
+                    user_id=message.user_id
+                )
+                ai_message = MessageDB(
+                    content=ai_content,
+                    model=message.model,
+                    role="assistant",
+                    session_id=message.session_id,
+                    user_id=message.user_id
+                )
+                session.add(user_message)
+                session.add(ai_message)
+                session.commit()
 
 
 def generate_completion(message: MessageIn):
@@ -90,8 +103,7 @@ def generate_completion(message: MessageIn):
         # 创建 OpenAI 的 chat completions 流式请求
         completion = client.chat.completions.create(
             model=message.model,
-            messages=[{"role": "system", "content": "You are a helpful assistant."}]
-            + message.history,
+            messages=[{"role": "system", "content": "You are a helpful assistant."}] + message.history,
             stream=True,
             temperature=message.temperature,
             max_tokens=message.max_tokens,
@@ -103,7 +115,7 @@ def generate_completion(message: MessageIn):
 
 @router.post("")
 async def stream_chat(
-    response: Response, message: MessageIn, completion=Depends(generate_completion)
+        response: Response, message: MessageIn, completion=Depends(generate_completion)
 ):
     # 设置响应头
     response.headers["Content-Type"] = "text/event-stream"
@@ -137,8 +149,8 @@ def get_models(session: Session = Depends(get_session)):
 # 切换模型
 @router.get("/toggle/{model_id}")
 def toggle_model(model_id: int, session: Session = Depends(get_session)):
-    all_modles = session.exec(select(ModelDB).where(ModelDB.active == True)).all()
-    for m in all_modles:
+    all_models = session.exec(select(ModelDB).where(ModelDB.active == True)).all()
+    for m in all_models:
         m.active = False
         session.add(m)
     model = session.get(ModelDB, model_id)
@@ -159,4 +171,4 @@ def create_session(session=Depends(create_session)):
 
 @router.get("/session/{user_id}", response_model=list[SessionDB])
 def get_sessions(*, session: Session = Depends(get_session), user_id: int):
-    return session.exec(select(SessionDB).where(SessionDB.user_id == user_id)).all()
+    return session.exec(select(SessionDB).where(SessionDB.user_id == user_id).order_by(SessionDB.id.desc())).all()
