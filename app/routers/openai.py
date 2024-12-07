@@ -9,7 +9,7 @@ from models.openai import MessageIn
 from models.openai import ModelDB, ModelIn, SessionDB, MessageDB
 from sqlmodel import select, Session
 from db import engine
-from dependencies import get_session
+from dependencies import get_session, get_page_params
 
 from dotenv import load_dotenv
 
@@ -69,7 +69,7 @@ def generate_event_stream(completion, message: MessageIn):
                 user_message = MessageDB(
                     content=message.content,
                     model=message.model,
-                    role="assistant",
+                    role="user",
                     session_id=message.session_id,
                     user_id=message.user_id
                 )
@@ -134,7 +134,7 @@ def get_models(session: Session = Depends(get_session)):
 
 
 # 切换模型
-@router.get("/toggle/{model_id}")
+@router.get("/model/toggle/{model_id}")
 def toggle_model(model_id: int, session: Session = Depends(get_session)):
     all_models = session.exec(select(ModelDB).where(ModelDB.active == True)).all()
     for m in all_models:
@@ -152,7 +152,14 @@ def toggle_model(model_id: int, session: Session = Depends(get_session)):
 
 # 创建会话
 def create_session(session: SessionDB, session_db: Session = Depends(get_session)):
+    true_session = session_db.exec(
+        select(SessionDB).where(SessionDB.active, SessionDB.user_id == session.user_id)
+    ).all()
+    for s in true_session:  # 关闭其他会话
+        s.active = False
+        session_db.add(s)
     db_session = SessionDB.model_validate(session)
+    db_session.active = True
     session_db.add(db_session)
     session_db.commit()
     session_db.refresh(db_session)
@@ -166,8 +173,24 @@ def create_session(session=Depends(create_session)):
 
 # 获取会画列表
 @router.get("/session/{user_id}", response_model=list[SessionDB])
-def get_sessions(*, session: Session = Depends(get_session), user_id: int):
-    return session.exec(select(SessionDB).where(SessionDB.user_id == user_id).order_by(SessionDB.id.desc())).all()
+def get_sessions(*, session: Session = Depends(get_session), user_id: int,
+                 page_params: dict = Depends(get_page_params)):
+    query = (select(SessionDB)
+             .where(SessionDB.user_id == user_id)
+             .order_by(SessionDB.id.desc())
+             .offset(page_params['offset'])
+             .limit(page_params['limit']))
+
+    results = session.exec(query).all()
+
+    # 如果查询结果数量小于 `limit`，重新查询所有符合条件的记录
+    if len(results) < page_params['limit']:
+        query_all = (select(SessionDB)
+                     .where(SessionDB.user_id == user_id)
+                     .order_by(SessionDB.id.desc()))
+        results = session.exec(query_all).all()
+
+    return results
 
 
 @router.delete("/session/{session_id}")
@@ -179,3 +202,40 @@ def delete_session(session_id: int, session: Session = Depends(get_session)):
     session.commit()
     print(data)
     return {"message": "删除成功", "session_id": session_id}
+
+
+@router.get('/session/toggle/{session_id}')
+def toggle_session(session_id: int, session: Session = Depends(get_session)):
+    new_session = session.exec(select(SessionDB).where(SessionDB.id == session_id)).first()
+    if not new_session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    old_session = session.exec(
+        select(SessionDB).where(SessionDB.active, SessionDB.user_id == new_session.user_id)).all()
+    for s in old_session:
+        s.active = False
+    new_session.active = True
+    session.add(new_session)
+    session.commit()
+    session.refresh(new_session)
+    return new_session
+
+
+# message
+@router.get("/message", response_model=list[MessageDB])
+def get_messages(*, session: Session = Depends(get_session), session_id: int,
+                 page_params: dict = Depends(get_page_params)):
+    """
+    获取记录消息列表
+    """
+    query = (select(MessageDB)
+             .where(MessageDB.session_id == session_id))
+    # .offset(page_params['offset'])
+    # .limit(page_params['limit']))
+
+    results = session.exec(query).all()
+
+    # # 如果查询结果数量小于 `limit`，重新查询所有符合条件的记录
+    # if len(results) < page_params['limit']:
+    #     query_all = (select(MessageDB).where(MessageDB.session_id == session_id))
+    #     results = session.exec(query_all).all()
+    return results
