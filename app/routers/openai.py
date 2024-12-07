@@ -7,8 +7,10 @@ import json
 import redis
 from models.openai import MessageIn
 from models.openai import ModelDB, ModelIn, SessionDB, MessageDB
-from sqlmodel import Session, select
+from sqlmodel import select, Session
 from db import engine
+from dependencies import get_session
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,12 +21,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # 创建 FastAPI 路由
 router = APIRouter(prefix="/openai", tags=["openai"])
 
-
-def get_session():
-    with Session(engine) as session:
-        yield session
-
-
 # 初始化 OpenAI 客户端
 client = OpenAI(
     base_url="https://api.openai-proxy.org/v1",
@@ -33,9 +29,6 @@ client = OpenAI(
 redis_client = redis.StrictRedis(
     host="localhost", port=6379, db=0, decode_responses=True
 )
-
-
-# 创建会话依赖
 
 
 # 生成事件流的异步生成器函数
@@ -171,6 +164,7 @@ def create_session(session=Depends(create_session)):
     return session
 
 
+# 获取会画列表
 @router.get("/session/{user_id}", response_model=list[SessionDB])
 def get_sessions(*, session: Session = Depends(get_session), user_id: int):
     return session.exec(select(SessionDB).where(SessionDB.user_id == user_id).order_by(SessionDB.id.desc())).all()
