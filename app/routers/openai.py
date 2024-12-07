@@ -229,8 +229,8 @@ def get_messages(*, session: Session = Depends(get_session), session_id: int,
     """
     query = (select(MessageDB)
              .where(MessageDB.session_id == session_id))
-    # .offset(page_params['offset'])
-    # .limit(page_params['limit']))
+             # .offset(page_params['offset'])
+             # .limit(page_params['limit']))
 
     results = session.exec(query).all()
 
